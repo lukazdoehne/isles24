@@ -72,6 +72,8 @@ def _get_image_path(case_dir: Path, modality: str) -> str:
         ),
         "cta": case_dir / f"ses-01/{case_name}_ses-01_space-ncct_cta.nii.gz",
         "label": case_dir / f"ses-02/{case_name}_ses-02_space-ncct_lesion-msk.nii.gz",
+        "brain_mask": case_dir
+        / f"ses-01/{case_name}_ses-01_space-ncct_brain-msk.nii.gz",
         **{
             mod: (
                 case_dir
@@ -87,7 +89,10 @@ def _get_image_path(case_dir: Path, modality: str) -> str:
 
 
 def _build_path_dict(
-    case_dir: Path, modalities: list[str] | str, process_guide: str | None = None
+    case_dir: Path,
+    modalities: list[str] | str,
+    process_guide: str | None = None,
+    brain_mask: bool = True,
 ) -> dict[str, str | list[str]]:
     """
     Build dictionary with for a single case with paths pointing to the right images and
@@ -103,6 +108,9 @@ def _build_path_dict(
         Modality to add as a "guide" key, used as an explicit guide for processing
         steps like foreground crop. If None, the "guide" key will not be added.
         Default is None.
+    brain_mask : bool
+        Whether to add the path to the brain mask obtained by skull stripping.
+        Default is True.
 
     Returns
     -------
@@ -111,6 +119,7 @@ def _build_path_dict(
         - "image": list of image paths as strings
         - "label": path to the label
         - "guide": path to image to be used as guide for processing, optional.
+        - "brain_mask": path to the brain mask, optional.
 
     Raises
     ------
@@ -133,26 +142,36 @@ def _build_path_dict(
     if process_guide is not None:
         path_dict["guide"] = _get_image_path(case_dir, process_guide)
 
+    if brain_mask:
+        path_dict["brain_mask"] = _get_image_path(case_dir, "brain_mask")
+
     return path_dict
 
 
-def patch_guide(datalist: dict, process_guide: str) -> dict:
-    """Patch processing guide if the loaded datalist doesn't have any"""
+def patch_datalist(datalist: dict, process_guide: str) -> dict:
+    """Patch processing guide and brain mask if the loaded datalist doesn't have any"""
 
+    skip_guide = False
     if "process_guide" in datalist.keys():
+        skip_guide = True
         print(
             "Datalist has already a specified processing guide: "
             f"{datalist['process_guide']}"
         )
-        return datalist
 
     datalist["process_guide"] = process_guide
     for split in ["training", "validation", "testing"]:
         for case in datalist[split]:
             case_dir = re.match(r"(.*)/ses-02/", case["label"]).group(1)
-            split["guide"] = _get_image_path(case_dir=case_dir, modality=process_guide)
+            case["brain_mask"] = _get_image_path(
+                case_dir=case_dir, modality="brain_mask"
+            )
+            if not skip_guide:
+                case["guide"] = _get_image_path(
+                    case_dir=case_dir, modality=process_guide
+                )
 
-    print(f"Patched datalist with processing guide: {process_guide}")
+    print(f"Patched datalist with brain mask and processing guide: {process_guide}")
     return datalist
 
 
@@ -161,6 +180,7 @@ def generate_datalist(
     target_dir: Path | None,
     modalities: list[str] | str,
     process_guide: str | None = None,
+    brain_mask: bool = True,
     n_folds: int = 5,
     val_fold: int | None = None,
     test_fold: int | None = None,
@@ -198,7 +218,10 @@ def generate_datalist(
             continue
 
         path_dict = _build_path_dict(
-            case_dir, modalities=modalities, process_guide=process_guide
+            case_dir,
+            modalities=modalities,
+            process_guide=process_guide,
+            brain_mask=brain_mask,
         )
 
         # Assign case to train, test, or validation split.
