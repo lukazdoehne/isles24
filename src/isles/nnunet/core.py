@@ -422,6 +422,7 @@ def train(
         wandb_project=config.wandb_project,
         run_id=run_id,
         run_dir=run_dir,
+        config=config,
     )
 
     # Patch the class lookup
