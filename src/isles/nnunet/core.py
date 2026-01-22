@@ -381,7 +381,12 @@ def run_preprocessing(config: NNUNetConfig) -> None:
     )
 
     print(f"Preprocessing {config.configuration}...")
-    preprocess(dataset_ids=[config.dataset_id], configurations=[config.configuration])
+    preprocess(
+        dataset_ids=[config.dataset_id],
+        plans_identifier=config.plans_name,
+        configurations=[config.configuration],
+        num_processes=[8],
+    )
 
     print("Done.")
 

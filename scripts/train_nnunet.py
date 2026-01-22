@@ -40,7 +40,7 @@ def main():
         },
     )
 
-    convert_datalist_to_nnunet(config, force=True)
+    convert_datalist_to_nnunet(config, force=False)
     run_preprocessing(config)
     train(config=config, run_id=run_id, run_dir=run_dir)
 
