@@ -444,11 +444,6 @@ def train(
             plans_identifier=config.plans_name,
             pretrained_weights=None,
             num_gpus=1,
-            use_compressed_data=False,
-            export_validation_probabilities=False,
-            continue_training=False,
-            only_run_validation=False,
-            disable_checkpointing=False,
             device=torch.device("cuda"),
         )
     finally:
