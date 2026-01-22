@@ -30,7 +30,7 @@ def main():
 
     config = NNUNetConfig(
         datalist_path=run_dir / "datalist.json",
-        data_root=data_root / "nnunet",
+        nnunet_root=data_root / "nnunet",
         intensity_windows={
             "cta": [0, 90],
             "cbf": [0, 35],
@@ -41,7 +41,7 @@ def main():
     )
 
     convert_datalist_to_nnunet(config, force=False)
-    run_preprocessing(config)
+    run_preprocessing(config, force=False)
     train(config=config, run_id=run_id, run_dir=run_dir)
 
 

@@ -25,6 +25,12 @@ from skimage.exposure import equalize_hist
 import wandb
 
 from nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
+from nnunetv2.experiment_planning.plan_and_preprocess_api import (
+    extract_fingerprints,
+    plan_experiments,
+    preprocess,
+)
+from nnunetv2.run import run_training as run_training_mod
 
 
 # ======================================================================================
@@ -40,7 +46,7 @@ class NNUNetConfig:
     ----------
     datalist_path : Path
         Path to MONAI-style datalist.json.
-    data_root : Path
+    nnunet_root : Path
         Data root for the various nnU-Net folders.
     dataset_id : int
         nnU-Net dataset ID.
@@ -81,7 +87,7 @@ class NNUNetConfig:
     """
 
     datalist_path: Path
-    data_root: Path
+    nnunet_root: Path
 
     dataset_id: int = 100
     dataset_name: str = "ISLES2024"
@@ -108,10 +114,11 @@ class NNUNetConfig:
 
     def __post_init__(self) -> None:
         self.datalist_path = Path(self.datalist_path)
-        self.data_root = Path(self.data_root)
-        self.nnunet_raw = self.data_root / "raw"
-        self.nnunet_preprocessed = self.data_root / "preprocessed"
-        self.nnunet_results = self.data_root / "results"
+        self.nnunet_root = Path(self.nnunet_root)
+
+        self.nnunet_raw = Path(os.environ["nnUNet_raw"])
+        self.nnunet_preprocessed = Path(os.environ["nnUNet_preprocessed"])
+        self.nnunet_results = Path(os.environ["nnUNet_results"])
 
         with open(self.datalist_path, "r") as file:
             datalist = json.load(file)
@@ -124,8 +131,12 @@ class NNUNetConfig:
             print("No validation fold defined in datalist.")
 
     @property
+    def dataset_name_full(self) -> str:
+        return f"Dataset{self.dataset_id:03d}_{self.dataset_name}"
+
+    @property
     def dataset_dir(self) -> Path:
-        return self.nnunet_raw / f"Dataset{self.dataset_id:03d}_{self.dataset_name}"
+        return self.nnunet_raw / self.dataset_name_full
 
     @property
     def images_tr(self) -> Path:
@@ -135,11 +146,9 @@ class NNUNetConfig:
     def labels_tr(self) -> Path:
         return self.dataset_dir / "labelsTr"
 
-    def set_environment(self) -> None:
-        """Set nnU-Net environment variables."""
-        os.environ["nnUNet_raw"] = str(self.nnunet_raw)
-        os.environ["nnUNet_preprocessed"] = str(self.nnunet_preprocessed)
-        os.environ["nnUNet_results"] = str(self.nnunet_results)
+    @property
+    def preprocessed_dir(self) -> Path:
+        return self.nnunet_preprocessed / self.dataset_name_full
 
     def to_json(self, path: str | Path) -> None:
         """Save configuration to JSON file."""
@@ -362,33 +371,45 @@ def convert_datalist_to_nnunet(config: NNUNetConfig, force: bool = False) -> Non
 # ======================================================================================
 
 
-def run_preprocessing(config: NNUNetConfig) -> None:
+def run_preprocessing(config: NNUNetConfig, force: bool = False) -> None:
     """Run nnU-Net planning and preprocessing."""
 
-    from nnunetv2.experiment_planning.plan_and_preprocess_api import (
-        extract_fingerprints,
-        plan_experiments,
-        preprocess,
-    )
-
     print("Extracting fingerprints...")
-    extract_fingerprints(dataset_ids=[config.dataset_id])
+    fingerprint = True
+    if (config.preprocessed_dir / "dataset_fingerprint.json").exists():
+        if not force:
+            fingerprint = False
+            print("Fingerprint already exist. Use force=True to generate again.")
+    if fingerprint:
+        extract_fingerprints(dataset_ids=[config.dataset_id])
 
     print(f"Planning with {config.planner}...")
-    plan_experiments(
-        dataset_ids=[config.dataset_id],
-        experiment_planner_class_name=config.planner,
-    )
+    plans = True
+    if (config.preprocessed_dir / config.plans_name).exists():
+        if not force:
+            plans = False
+            print("Plans already exist. Use force=True to generate again.")
+    if plans:
+        plan_experiments(
+            dataset_ids=[config.dataset_id],
+            experiment_planner_class_name=config.planner,
+        )
 
     print(f"Preprocessing {config.configuration}...")
-    preprocess(
-        dataset_ids=[config.dataset_id],
-        plans_identifier=config.plans_name,
-        configurations=[config.configuration],
-        num_processes=[8],
-    )
+    gen_preprocess = True
+    if (config.preprocessed_dir / "nnUNetPlans_3d_fullres").exists():
+        if not force:
+            gen_preprocess = False
+            print("Preprocessed data already exist. Use force=True to generate again.")
+    if not gen_preprocess:
+        preprocess(
+            dataset_ids=[config.dataset_id],
+            plans_identifier=config.plans_name,
+            configurations=[config.configuration],
+            num_processes=[8],
+        )
 
-    print("Done.")
+    print("Preprocessing complete.")
 
 
 # ======================================================================================
@@ -414,9 +435,6 @@ def train(
         Directory with the run files.
 
     """
-    config.set_environment()
-
-    from nnunetv2.run import run_training as run_training_mod
 
     trainer_class = create_wandb_trainer_class(
         wandb_project=config.wandb_project,
@@ -437,7 +455,7 @@ def train(
 
     try:
         run_training_mod.run_training(
-            dataset_name_or_id=config.dataset_id,
+            dataset_name_or_id=config.dataset_name_full,
             configuration=config.configuration,
             fold=config.val_fold,
             trainer_class_name="WandbnnUNetTrainer",
