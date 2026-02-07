@@ -162,7 +162,7 @@ def patch_datalist(datalist: dict, process_guide: str) -> dict:
     datalist["process_guide"] = process_guide
     for split in ["training", "validation", "testing"]:
         for case in datalist[split]:
-            case_dir = re.match(r"(.*)/ses-02/", case["label"]).group(1)
+            case_dir = Path(re.match(r"(.*)/ses-02/", case["label"]).group(1))
             case["brain_mask"] = _get_image_path(
                 case_dir=case_dir, modality="brain_mask"
             )
@@ -332,6 +332,7 @@ def snap_affines(
     data_root: Path,
     modalities: list[str] | None = None,
     reference_mod: str = "ncct",
+    brain_mask: bool = True,
     atol: float = 1e-4,
     log_file: Path | None = None,
     dry_run: bool = False,
@@ -351,7 +352,9 @@ def snap_affines(
     with operation_logger("affine_snap_logger", log_file=log_file) as logger:
         logger.info(f"Snapping affines with atol={atol} to reference {reference_mod}")
         for case_dir in case_dirs:
-            path_dict = _build_path_dict(case_dir, modalities=modalities)
+            path_dict = _build_path_dict(
+                case_dir, modalities=modalities, brain_mask=brain_mask
+            )
             channel_list = list(to_paths(path_dict["image"]))
             _snap_affines_image(
                 channel_list,

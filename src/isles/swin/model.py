@@ -230,6 +230,7 @@ class SwinUNETRPredictor:
         model: MultiEncoderSwinUNETR | BaseSwinUNETR,
         config: SwinTrainConfig,
         final: bool = False,
+        **config_overrides,
     ) -> "SwinUNETRPredictor":
         """Create predictor from training config.
 
@@ -241,13 +242,21 @@ class SwinUNETRPredictor:
             Training configuration
         final : bool, default=False
             Whether to use final evaluation settings
+        **config_overrides
+            Keyword arguments to override in config
 
         Returns
         -------
         SwinUNETRPredictor
             Predictor instance
         """
+
+        # Override config attributes
+        for key, value in config_overrides.items():
+            setattr(config, key, value)
+
         overlap = config.val_overlap_final if final else config.val_overlap
+
         return cls(
             model=model,
             roi_size=config.roi_size,
@@ -286,14 +295,10 @@ class SwinUNETRPredictor:
         checkpoint = Checkpoint.load(checkpoint_path)
         config = SwinTrainConfig(**checkpoint.config)
 
-        # Override config attributes
-        for key, value in config_overrides.items():
-            setattr(config, key, value)
-
         model = get_model(config)
         model.load_state_dict(checkpoint.model_state_dict)
         model = model.to(device)
-        return cls.from_config(model, config, final)
+        return cls.from_config(model, config, final, **config_overrides)
 
     @property
     def device(self) -> torch.device:

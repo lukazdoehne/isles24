@@ -30,6 +30,7 @@ def final_evaluation(
     val_loader: DataLoader,
     config: SwinTrainConfig,
     out_dir: Path,
+    **config_overrides,
 ) -> pd.DataFrame:
     """
     Evaluate model on validation set at original resolution.
@@ -47,6 +48,8 @@ def final_evaluation(
         Training configuration.
     out_dir : Path
         Directory where to save final predictions
+    **config_overrides
+        Keyword arguments to override in config
 
     Returns
     -------
@@ -55,7 +58,7 @@ def final_evaluation(
     """
     device = torch.device(config.device)
     predictor = SwinUNETRPredictor.from_checkpoint(
-        checkpoint_path=checkpoint_path, device=device, final=True
+        checkpoint_path=checkpoint_path, device=device, final=True, **config_overrides
     )
 
     pred_dir = out_dir / "predictions"
