@@ -5,6 +5,7 @@ Model code for multi-encoder Swin-UNETR
 import copy
 from pathlib import Path
 from collections.abc import Sequence
+from itertools import product
 
 import torch
 import torch.nn as nn
@@ -202,6 +203,8 @@ class SwinUNETRPredictor:
         Batch size for sliding window inference
     sw_blend_mode : str, default="gaussian"
         Blending mode for overlapping predictions
+    tta_flips : bool, default=True
+        Wheter to perform test time augmentation with volume flips
     amp : bool, default=True
         Whether to use automatic mixed precision
     """
@@ -213,10 +216,12 @@ class SwinUNETRPredictor:
         overlap: float = 0.2,
         sw_batch_size: int = 2,
         sw_blend_mode: str = "gaussian",
+        tta_flips: bool = True,
         amp: bool = True,
     ):
         self.model = model
         self.amp = amp
+        self.tta_flips = tta_flips
         self.inferer = SlidingWindowInferer(
             roi_size=roi_size,
             sw_batch_size=sw_batch_size,
@@ -263,6 +268,7 @@ class SwinUNETRPredictor:
             overlap=overlap,
             sw_batch_size=config.inferer_batch_size,
             sw_blend_mode=config.inferer_blend_mode,
+            tta_flips=config.tta_flips,
             amp=config.amp,
         )
 
@@ -331,24 +337,28 @@ class SwinUNETRPredictor:
     def predict_logits(self, image: torch.Tensor) -> torch.Tensor:
         """Predict raw logits using sliding window inference.
 
+        When ``tta_flips`` is enabled, the input is mirrored along all
+        combinations of spatial axes (8 passes for 3D), each result is
+        flipped back, and the logits are averaged.
+
         Parameters
         ----------
         image : torch.Tensor
-            Input image tensor
+            Input image tensor of shape ``(B, C, H, W, D)``.
 
         Returns
         -------
         torch.Tensor
-            Raw logits on original device
+            Raw logits on the original input device.
         """
         self.model.eval()
         input_device = image.device
         image = image.to(self.device)
 
-        with torch.amp.autocast(
-            device_type=self.device.type, dtype=torch.bfloat16, enabled=self.amp
-        ):
-            logits = self.inferer(image, self.model)
+        if self.tta_flips:
+            logits = self._predict_logits_tta(image)
+        else:
+            logits = self._predict_logits_single(image)
 
         return logits.to(input_device)
 
@@ -385,3 +395,54 @@ class SwinUNETRPredictor:
         """
         logits = self.predict_logits(image)
         return logits.argmax(dim=1, keepdim=True)
+
+    def _predict_logits_single(self, image: torch.Tensor) -> torch.Tensor:
+        """Single-pass sliding window inference.
+
+        Parameters
+        ----------
+        image : torch.Tensor
+            Input on ``self.device``.
+
+        Returns
+        -------
+        torch.Tensor
+            Raw logits.
+        """
+        with torch.amp.autocast(
+            device_type=self.device.type, dtype=torch.bfloat16, enabled=self.amp
+        ):
+            return self.inferer(image, self.model)
+
+    @torch.no_grad()
+    def _predict_logits_tta(self, image: torch.Tensor) -> torch.Tensor:
+        """Mirroring TTA: average logits over all 2^3 flip combinations.
+
+        Parameters
+        ----------
+        image : torch.Tensor
+            Input on ``self.device``, shape ``(B, C, H, W, D)``.
+
+        Returns
+        -------
+        torch.Tensor
+            Averaged logits over 8 mirrored views.
+        """
+
+        spatial_dims = [2, 3, 4]
+        logits_sum: torch.Tensor | None = None
+
+        for flip_flags in product([False, True], repeat=len(spatial_dims)):
+            axes = [d for d, flip in zip(spatial_dims, flip_flags) if flip]
+
+            aug = torch.flip(image, dims=axes) if axes else image
+            pred = self._predict_logits_single(aug)
+            if axes:
+                pred = torch.flip(pred, dims=axes)
+
+            if logits_sum is None:
+                logits_sum = pred
+            else:
+                logits_sum = logits_sum + pred
+
+        return logits_sum / (2 ** len(spatial_dims))
