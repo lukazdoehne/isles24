@@ -6,6 +6,7 @@ import copy
 from pathlib import Path
 from collections.abc import Sequence
 from itertools import product
+from functools import partial
 
 import torch
 import torch.nn as nn
@@ -13,7 +14,7 @@ import torch.nn as nn
 from monai.networks.nets.swin_unetr import SwinUNETR, filter_swinunetr
 from monai.networks.blocks import UnetrBasicBlock
 from monai.networks.utils import copy_model_state
-from monai.inferers import SlidingWindowInferer
+from monai.inferers import sliding_window_inference
 
 from isles.swin.config import SwinTrainConfig
 from isles.swin.checkpoint import Checkpoint
@@ -203,7 +204,14 @@ class SwinUNETRPredictor:
         Batch size for sliding window inference
     sw_blend_mode : str, default="gaussian"
         Blending mode for overlapping predictions
-    tta_flips : bool, default=True
+    crop_margin : int | None, default=None
+        Margin in voxels to exclude from predictions. This calculates
+        a custom weight map and overrides `sw_blend_mode` to `'constant'`.
+        `overlap` should be larger than `2 * crop_margin / overlap` to
+        ensure non-empty interior predictions; if smaller than that,
+        it will be overridden. If None, no custom weights are calculated,
+        and blending weights are controlled by sw_blend_mode.
+    tta_flips : bool, default=False
         Wheter to perform test time augmentation with volume flips
     amp : bool, default=True
         Whether to use automatic mixed precision
@@ -216,17 +224,29 @@ class SwinUNETRPredictor:
         overlap: float = 0.2,
         sw_batch_size: int = 2,
         sw_blend_mode: str = "gaussian",
-        tta_flips: bool = True,
+        crop_margin: int | None = None,
+        tta_flips: bool = False,
         amp: bool = True,
     ):
         self.model = model
         self.amp = amp
         self.tta_flips = tta_flips
-        self.inferer = SlidingWindowInferer(
+
+        if crop_margin is not None:
+            weight_map, overlap = generate_weight_map(
+                roi_size=roi_size, margin=crop_margin, overlap=overlap
+            )
+            sw_blend_mode = "constant"
+        else:
+            weight_map = None
+
+        self.inferer = partial(
+            sliding_window_inference,
             roi_size=roi_size,
             sw_batch_size=sw_batch_size,
             overlap=overlap,
             mode=sw_blend_mode,
+            roi_weight_map=weight_map,
         )
 
     @classmethod
@@ -268,6 +288,7 @@ class SwinUNETRPredictor:
             overlap=overlap,
             sw_batch_size=config.inferer_batch_size,
             sw_blend_mode=config.inferer_blend_mode,
+            crop_margin=config.inferer_crop_margin,
             tta_flips=config.tta_flips,
             amp=config.amp,
         )
@@ -412,7 +433,7 @@ class SwinUNETRPredictor:
         with torch.amp.autocast(
             device_type=self.device.type, dtype=torch.bfloat16, enabled=self.amp
         ):
-            return self.inferer(image, self.model)
+            return self.inferer(inputs=image, predictor=self.model)
 
     @torch.no_grad()
     def _predict_logits_tta(self, image: torch.Tensor) -> torch.Tensor:
@@ -446,3 +467,56 @@ class SwinUNETRPredictor:
                 logits_sum = logits_sum + pred
 
         return logits_sum / (2 ** len(spatial_dims))
+
+
+def generate_weight_map(
+    roi_size: tuple[int, ...],
+    margin: int,
+    overlap: float,
+) -> tuple[torch.Tensor, float]:
+    """Create a binary weight map zeroing a border margin, with overlap validation.
+
+    Parameters
+    ----------
+    roi_size : tuple[int, ...]
+        Spatial size of the ROI window.
+    margin : int
+        Number of voxels to zero out from each border per dimension.
+    overlap : float
+        Sliding window overlap fraction in [0, 1), as passed to the inferer.
+        If overlap is smaller than the minimum overlap required to avoid
+        empty predictions in the interior of the volume, it will be set to
+        this minimum value `2 * margin / roi_size`.
+
+    Returns
+    -------
+    torch.Tensor
+        Shape (roi_size) weight map with 0s in the margin and 1s inside.
+    float
+        The updated overlap, same as the supplied one if sufficiently large.
+
+    Raises
+    ------
+    UserWarning
+        When overlap is automatically updated to ensure correct prediction.
+    """
+    min_overlap_per_dim = [2 * margin / s for s in roi_size]
+    min_overlap = max(min_overlap_per_dim)
+    if overlap < min_overlap:
+        raise UserWarning(
+            f"Supplied overlap {overlap} too small for correct predictions. "
+            f"Updated to {min_overlap}"
+        )
+        overlap = min_overlap
+
+    weights = torch.ones(roi_size, dtype=torch.float32)
+    for dim, size in enumerate(roi_size):
+        idx = [slice(None)] * len(roi_size)
+
+        idx[dim] = slice(0, margin)
+        weights[tuple(idx)] = 0.0
+
+        idx[dim] = slice(size - margin, size)
+        weights[tuple(idx)] = 0.0
+
+    return weights, overlap

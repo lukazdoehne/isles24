@@ -62,6 +62,10 @@ class SwinTrainConfig:
         Batch size for sliding window inference.
     inferer_blend_mode : str
         Blend mode for sliding window inference. Can be "constant" or "gaussian".
+    inferer_crop_margin : int | None
+        Size of the margin to crop from patched during inference. This is only
+        used during final evaluation. If not None, overrides `inferer_blend_mode`
+        and `val_overlap_final` if it's too small. If None, no cropping is done.
     tta_flips : bool
         Whether to perform test time augmentation by volume flips during
         final inference.
@@ -102,10 +106,25 @@ class SwinTrainConfig:
     val_overlap_final: float = 0.5
     inferer_batch_size: int = 4
     inferer_blend_mode: str = "constant"
-    tta_flips: bool = True
+    inferer_crop_margin: int | None = None
+    tta_flips: bool = False
 
     # Device
     device: str = "cuda"
+
+    def __post_init__(self) -> None:
+        """Ensure that parameter values are not incompatible"""
+        
+        # Update parameters when crop_margin is specified
+        if self.inferer_crop_margin is not None:
+            min_overlap = 2 * self.inferer_crop_margin / min(self.roi_size)
+            self.inferer_blend_mode = "constant"
+            if self.val_overlap_final < min_overlap:
+                raise UserWarning(
+                    f"Supplied overlap {self.overlap} too small for correct predictions. "
+                    f"Updated to {min_overlap}"
+                )
+                self.val_overlap_final = min_overlap
 
     def to_json(self, path: str | Path) -> None:
         """Save configuration to JSON file."""
