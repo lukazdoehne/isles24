@@ -13,10 +13,10 @@ from isles.utils import generate_datalist
 
 
 def main():
-    run_id = "run-022"
+    run_id = "run-023"
     config = SwinTrainConfig(
         model="MultiEncoderSwinUNETR",
-        max_epochs=500,
+        max_epochs=300,
         modalities=["cta", "cbf"],
         target_spacing=(1.0, 1.0, 1.0),
         roi_size=(64, 64, 64),
@@ -28,6 +28,9 @@ def main():
             "cbf": [0, 35],
         },
         batch_size=1,
+        val_interval=10,
+        inspect_patches=True,
+        inspect_interval=25,
     )
 
     data_root = Path("/home/renku/work/data-local")
@@ -81,6 +84,7 @@ def main():
         val_loader=val_loader,
         config=config,
         out_dir=eval_dir,
+        save_logits=True,
     )
     wandb.save(f"{eval_dir}/**/*", base_path=run_dir)
 
