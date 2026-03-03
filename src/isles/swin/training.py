@@ -302,7 +302,7 @@ def train_swin(
                 _save_train_inspection(
                     model=model,
                     train_loader=train_loader,
-                    epoch=epoch,
+                    epoch=epoch + 1,
                     out_dir=run_dir / "training-inspection",
                     config=config,
                 )
