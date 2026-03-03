@@ -3,7 +3,8 @@ Code for multi encoder Swin-UNETR
 """
 
 from pathlib import Path
-import re
+import csv
+from collections.abc import Callable
 
 from tqdm import tqdm
 import wandb
@@ -29,6 +30,209 @@ from isles.swin.transforms import (
 )
 
 
+def _center_of_mass_normalized(arr: np.ndarray) -> np.ndarray:
+    """Compute center of mass of a 3D binary or probability array in normalized
+    coordinates [0, 1]^3.
+
+    Parameters
+    ----------
+    arr : np.ndarray
+        3D array of shape ``(H, W, D)``.
+
+    Returns
+    -------
+    np.ndarray
+        Normalized CoM of shape ``(3,)``, or ``[nan, nan, nan]`` if the array is empty.
+    """
+    total = arr.sum()
+    if total == 0:
+        return np.full(arr.ndim, np.nan)
+    indices = np.indices(arr.shape)
+    com = np.array([(arr * indices[i]).sum() / total for i in range(arr.ndim)])
+    return com / (np.array(arr.shape) - 1)
+
+
+class TrainingInspector:
+    """Accumulates spatial bias statistics and saves inspection data during training.
+
+    Maintains a running foreground probability heatmap across all training patches
+    and logs per-patch center-of-mass statistics to a CSV. Optionally saves NIfTI
+    files for visual inspection at specified intervals.
+
+    Parameters
+    ----------
+    out_dir : Path
+        Root directory for all inspection outputs.
+    roi_size : tuple[int, ...]
+        Spatial size of training patches, used to initialise the heatmap.
+    case_id_fn : Callable[[str], str] | None
+        Function mapping a file path string to a case identifier string.
+        If None, the filename stem is used.
+    save_patches : bool
+        Whether to save NIfTI patch files on each ``save`` call. Default True.
+    """
+
+    def __init__(
+        self,
+        out_dir: Path,
+        roi_size: tuple[int, ...],
+        case_id_fn: Callable[[str], str] | None = None,
+        save_patches: bool = True,
+    ) -> None:
+        self.out_dir = out_dir
+        self.save_patches = save_patches
+        self.case_id_fn = case_id_fn or (lambda p: Path(p).stem.split(".")[0])
+
+        self.heatmap_acc = np.zeros(roi_size, dtype=np.float64)
+        self.n_patches = 0
+
+        out_dir.mkdir(parents=True, exist_ok=True)
+        self._com_csv_path = out_dir / "com_stats.csv"
+        self._com_header_written = self._com_csv_path.exists()
+
+    def update(self, batch: dict, logits: torch.Tensor) -> None:
+        """Accumulate heatmap and CoM statistics for one training batch.
+
+        Should be called after the forward pass on every batch, before
+        the backward pass or optimizer step.
+
+        Parameters
+        ----------
+        batch : dict
+            Training batch dict with ``"image"`` and ``"label"`` MetaTensors.
+        logits : torch.Tensor
+            Raw model logits of shape ``(B, num_classes, H, W, D)``, on any device.
+        """
+        probs_fg = torch.softmax(logits.float(), dim=1)[:, 1].detach().cpu().numpy()
+        self.heatmap_acc += probs_fg.sum(axis=0)
+        self.n_patches += probs_fg.shape[0]
+
+        filenames = batch["image"].meta["filename_or_obj"]
+        labels = batch["label"]
+        patch_counters: dict[str, int] = {}
+        rows = []
+
+        for i in range(probs_fg.shape[0]):
+            filename = (
+                filenames[i] if isinstance(filenames, (list, tuple)) else filenames
+            )
+            case_id = self.case_id_fn(str(filename))
+
+            patch_idx = patch_counters.get(case_id, 0)
+            patch_counters[case_id] = patch_idx + 1
+
+            gt_com = _center_of_mass_normalized(labels[i, 0].float().cpu().numpy())
+            pred_mask = (probs_fg[i] > 0.5).astype(np.float32)
+            pred_com = _center_of_mass_normalized(pred_mask)
+
+            rows.append({
+                "case_id": case_id,
+                "patch_idx": patch_idx,
+                "gt_empty": np.isnan(gt_com[0]),
+                "pred_empty": np.isnan(pred_com[0]),
+                "gt_com_x": gt_com[0],
+                "gt_com_y": gt_com[1],
+                "gt_com_z": gt_com[2],
+                "pred_com_x": pred_com[0],
+                "pred_com_y": pred_com[1],
+                "pred_com_z": pred_com[2],
+            })
+
+        with open(self._com_csv_path, "a", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=rows[0].keys())
+            if not self._com_header_written:
+                writer.writeheader()
+                self._com_header_written = True
+            writer.writerows(rows)
+
+    @torch.no_grad()
+    def save(
+        self,
+        model: torch.nn.Module,
+        train_loader: DataLoader,
+        epoch: int,
+        config: SwinTrainConfig,
+    ) -> None:
+        """Save heatmap and optionally NIfTI patches for the current epoch.
+
+        The model is restored to its prior training/eval state after the call.
+
+        Parameters
+        ----------
+        model : torch.nn.Module
+            Segmentation network.
+        train_loader : DataLoader
+            Training dataloader. The first batch is used for patch saving.
+        epoch : int
+            Current epoch number (1-indexed), used for directory naming.
+        config : SwinTrainConfig
+            Training configuration.
+        """
+        # Heatmap
+        if self.n_patches > 0:
+            heatmap_mean = (self.heatmap_acc / self.n_patches).astype(np.float32)
+            np.save(self.out_dir / "heatmap_foreground_prob.npy", heatmap_mean)
+
+        if not self.save_patches:
+            return
+
+        was_training = model.training
+        model.eval()
+        device = torch.device(config.device)
+
+        batch = next(iter(train_loader))
+        images: torch.Tensor = batch["image"]
+        labels: torch.Tensor = batch["label"]
+
+        with torch.amp.autocast(device.type, dtype=torch.bfloat16, enabled=config.amp):
+            logits = model(images.to(device))
+
+        logits = logits.float().cpu()
+        epoch_dir = self.out_dir / f"patches/epoch_{epoch:04d}"
+        epoch_dir.mkdir(parents=True, exist_ok=True)
+
+        filenames = images.meta["filename_or_obj"]
+        affines = images.meta["affine"]
+        patch_counters: dict[str, int] = {}
+
+        for i in range(images.shape[0]):
+            filename = (
+                filenames[i] if isinstance(filenames, (list, tuple)) else filenames
+            )
+            case_id = self.case_id_fn(str(filename))
+
+            patch_idx = patch_counters.get(case_id, 0)
+            patch_counters[case_id] = patch_idx + 1
+
+            prefix = epoch_dir / f"{case_id}_{patch_idx:02d}"
+            affine_np: np.ndarray = affines[i].numpy()
+
+            nib.save(
+                nib.Nifti1Image(
+                    images[i].float().numpy().transpose(1, 2, 3, 0), affine_np
+                ),
+                f"{prefix}_image.nii.gz",
+            )
+            nib.save(
+                nib.Nifti1Image(
+                    labels[i].numpy().squeeze(0).astype(np.uint8), affine_np
+                ),
+                f"{prefix}_gt.nii.gz",
+            )
+            nib.save(
+                nib.Nifti1Image(logits[i].numpy().transpose(1, 2, 3, 0), affine_np),
+                f"{prefix}_logits.nii.gz",
+            )
+            nib.save(
+                nib.Nifti1Image(
+                    logits[i].numpy().argmax(axis=0).astype(np.uint8), affine_np
+                ),
+                f"{prefix}_pred.nii.gz",
+            )
+
+        model.train(was_training)
+
+
 def _train_epoch(
     model: torch.nn.Module,
     train_loader: DataLoader,
@@ -36,6 +240,7 @@ def _train_epoch(
     optimizer: torch.optim.Optimizer,
     epoch: int,
     config: SwinTrainConfig,
+    inspector: TrainingInspector | None = None,
 ) -> float:
     """
     Run one training epoch.
@@ -64,110 +269,13 @@ def _train_epoch(
         clip_grad_norm_(model.parameters(), max_norm=0.5)
         optimizer.step()
 
+        if inspector is not None:
+            inspector.update({"image": image, "label": label}, logits)
+
         epoch_loss += loss.item()
         train_pbar.set_postfix(loss=f"{loss.item():.4f}")
 
     return epoch_loss / len(train_loader)
-
-
-@torch.no_grad()
-def _save_train_inspection(
-    model: torch.nn.Module,
-    train_loader: DataLoader,
-    epoch: int,
-    out_dir: Path,
-    config: SwinTrainConfig,
-) -> None:
-    """Save all crops from a single training batch with logits, mask, and label.
-
-    Runs inference in eval mode on the first batch of the training loader without
-    sliding window inference. For each crop in the batch, saves image, ground truth
-    label, raw logits, and predicted mask as NIfTI files. Multiple crops from the
-    same source image are disambiguated with a per-case patch counter.
-
-    The model is restored to train mode after the call.
-
-    Parameters
-    ----------
-    model : torch.nn.Module
-        Segmentation network.
-    train_loader : DataLoader
-        Training dataloader. The first batch is used.
-    epoch : int
-        Current epoch number (1-indexed), used for output directory naming.
-    out_dir : Path
-        Root inspection directory. A subdirectory ``epoch_{epoch:04d}`` is created.
-    config : SwinTrainConfig
-        Training configuration.
-    """
-
-    device = torch.device(config.device)
-    epoch_dir = out_dir / f"epoch_{epoch:04d}"
-    epoch_dir.mkdir(parents=True, exist_ok=True)
-
-    model.eval()
-
-    batch = next(iter(train_loader))
-    images: torch.Tensor = batch["image"]
-    labels: torch.Tensor = batch["label"]
-
-    with torch.amp.autocast(device.type, dtype=torch.bfloat16, enabled=config.amp):
-        logits = model(images.to(device))
-
-    logits = logits.float().cpu()
-
-    # Track per-case patch count to avoid filename collisions
-    patch_counters: dict[str, int] = {}
-
-    filenames = images.meta["filename_or_obj"]
-    affines = images.meta["affine"]
-
-    for i in range(images.shape[0]):
-        filename = filenames[i] if isinstance(filenames, (list, tuple)) else filenames
-        match = re.search(r"sub-stroke\d+", str(filename))
-        case_id = match.group() if match else f"sample{i:02d}"
-
-        patch_idx = patch_counters.get(case_id, 0)
-        patch_counters[case_id] = patch_idx + 1
-
-        prefix = epoch_dir / f"{case_id}_{patch_idx:02d}"
-        affine_np: np.ndarray = affines[i].numpy()
-
-        # NOTE: images have to reshaped from (C, H, W, D) -> (H, W, D, C) to match
-        # Nifti conventions.
-        nib.save(
-            nib.Nifti1Image(
-                images[i].float().numpy().transpose(1, 2, 3, 0),
-                affine=affine_np,
-            ),
-            f"{prefix}_image.nii.gz",
-        )
-
-        nib.save(
-            nib.Nifti1Image(
-                labels[i].numpy().squeeze(0).astype(np.uint8),
-                affine=affine_np,
-            ),
-            f"{prefix}_gt.nii.gz",
-        )
-
-        nib.save(
-            nib.Nifti1Image(
-                logits[i].numpy().transpose(1, 2, 3, 0),
-                affine=affine_np,
-            ),
-            f"{prefix}_logits.nii.gz",
-        )
-
-        nib.save(
-            nib.Nifti1Image(
-                logits[i].numpy().argmax(axis=0).astype(np.uint8),
-                affine=affine_np,
-            ),
-            f"{prefix}_pred.nii.gz",
-        )
-
-    model.train()
 
 
 @torch.no_grad()
@@ -216,6 +324,7 @@ def train_swin(
     train_loader: DataLoader,
     val_loader: DataLoader,
     upload_checkpoints: bool = True,
+    case_id_fn: Callable[[str], str] | None = None,
 ) -> None:
     """
     Train a binary segmentation model.
@@ -235,6 +344,10 @@ def train_swin(
     upload_checkpoints : bool
         Whether to upload the best checkpoint to Weights and Biases.
         Default is True.
+    case_id_fn : Callable[[str], str] | None
+        Function used to extract case name from the file names during training
+        inspection, only performed when config.inspect_training is True.
+        If None, uses the filename stem. Default is None.
     """
     if isinstance(run_dir, str):
         run_dir = Path(run_dir)
@@ -267,6 +380,13 @@ def train_swin(
         overlap=config.val_overlap,
         mode="gaussian",
     )
+    inspector: TrainingInspector | None = None
+    if config.inspect_training:
+        inspector = TrainingInspector(
+            out_dir=run_dir / "training-inspection",
+            roi_size=tuple(config.roi_size),
+            case_id_fn=case_id_fn,
+        )
 
     loss_fn = get_loss_function(config)
     dice_metric = get_dice_metric(config)
@@ -282,6 +402,7 @@ def train_swin(
             optimizer=optimizer,
             epoch=epoch,
             config=config,
+            inspector=inspector,
         )
         scheduler.step()
         current_lr = scheduler.get_last_lr()[0]
@@ -292,22 +413,19 @@ def train_swin(
             "epoch": epoch + 1,
         }
 
-        # === Visual inspection of training patches ===
-        if config.inspect_patches:
-            if (
-                (epoch + 1) % config.inspect_interval == 0
-                or epoch == config.max_epochs
-                or epoch == 0
-            ):
-                _save_train_inspection(
-                    model=model,
-                    train_loader=train_loader,
-                    epoch=epoch + 1,
-                    out_dir=run_dir / "training-inspection",
-                    config=config,
-                )
-        
-        
+        # === Optional inspection of training patches ===
+        if inspector is not None and (
+            (epoch + 1) % config.inspect_interval == 0
+            or epoch == config.max_epochs
+            or epoch == 0
+        ):
+            inspector.save(
+                model=model,
+                train_loader=train_loader,
+                epoch=epoch + 1,
+                config=config,
+            )
+
         # === Validation ===
         if (
             (epoch + 1) % config.val_interval == 0

@@ -104,7 +104,7 @@ class SwinTrainConfig:
     warmup_ratio: float = 0.05
     amp: bool = True
     include_background: bool = False
-    inspect_patches: bool = False
+    inspect_training: bool = False
     inspect_interval: int = 25
 
     # Validation
