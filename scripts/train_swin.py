@@ -14,7 +14,7 @@ from isles.utils import generate_datalist
 
 
 def main():
-    run_id = "run-024"
+    run_id = "run-025"
     config = SwinTrainConfig(
         model="MultiEncoderSwinUNETR",
         max_epochs=300,
