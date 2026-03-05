@@ -4,6 +4,7 @@ Train multi encoder Swin-UNETR
 
 from pathlib import Path
 import re
+import argparse
 from dataclasses import asdict
 import wandb
 from isles.swin.config import SwinTrainConfig
@@ -13,20 +14,45 @@ from isles.swin.evaluation import final_evaluation
 from isles.utils import generate_datalist
 
 
-def main():
-    run_id = "run-025"
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Train multi encoder Swin-UNETR")
+    parser.add_argument("--run-id", required=True, type=str)
+    parser.add_argument(
+        "--modalities",
+        nargs="+",
+        default=["cta", "cbf"],
+        type=str,
+        choices=["cta", "cbf", "cbv", "mtt", "tmax"],
+    )
+    parser.add_argument(
+        "--model",
+        default="MultiEncoderSwinUNETR",
+        type=str,
+        choices=["BaseSwinUNETR", "MultiEncoderSwinUNETR"],
+    )
+    parser.add_argument("--max-epochs", default=300, type=int)
+    parser.add_argument("--learning-rate", default=1e-4, type=float)
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+
     config = SwinTrainConfig(
-        model="MultiEncoderSwinUNETR",
-        max_epochs=300,
-        modalities=["cta", "cbf"],
+        model=args.model,
+        max_epochs=args.max_epochs,
+        modalities=args.modalities,
         target_spacing=(1.0, 1.0, 1.0),
         roi_size=(64, 64, 64),
-        learning_rate=1e-4,
+        learning_rate=args.learning_rate,
         crop_ratios=(1, 1),
         include_background=False,
         intensity_windows={
             "cta": [0, 90],
             "cbf": [0, 35],
+            "cbv": [0, 10],
+            "mtt": [0, 20],
+            "tmax": [0, 7],
         },
         batch_size=1,
         val_interval=10,
@@ -38,7 +64,7 @@ def main():
     pretrained_path = (
         data_root / "pretrained/swin_unetr.base_5000ep_f48_lr2e-4_pretrained.pt"
     )
-    run_dir = data_root / f"runs/{run_id}"
+    run_dir = data_root / f"runs/{args.run_id}"
     run_dir.mkdir(parents=True, exist_ok=True)
 
     datalist = generate_datalist(
@@ -51,7 +77,7 @@ def main():
 
     wandb.init(
         project="ISLES",
-        name=run_id,
+        name=args.run_id,
         dir=run_dir,
         config={
             **asdict(config),
@@ -66,7 +92,6 @@ def main():
     wandb.log_artifact(artifact)
 
     train_loader, val_loader = get_swin_dataloaders(datalist, config)
-
     model = get_model(config)
     model.load_pretrained_encoders(pretrained_path)
 
@@ -88,7 +113,9 @@ def main():
         out_dir=eval_dir,
         save_logits=True,
     )
+
     wandb.save(f"{eval_dir}/**/*", base_path=run_dir)
+    wandb.finish()
 
 
 if __name__ == "__main__":
