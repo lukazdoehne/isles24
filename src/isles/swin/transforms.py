@@ -33,6 +33,7 @@ from monai.transforms import (
     MaskIntensityd,
     RandSpatialCropSamplesd,
     MultiSampleTrait,
+    Randomizable,
 )
 from monai.utils import convert_to_dst_type
 from monai.data import DataLoader
@@ -251,7 +252,7 @@ class PerChannelScaleIntensityd(MapTransform):
         return d
 
 
-class RandCropByModed(MapTransform, MultiSampleTrait):
+class RandCropByModed(Randomizable, MapTransform, MultiSampleTrait):
     """Randomly crop patches using either label-guided or fully random spatial sampling.
 
     Parameters
@@ -303,6 +304,9 @@ class RandCropByModed(MapTransform, MultiSampleTrait):
             )
         else:
             raise ValueError(f"Unknown crop mode: {mode!r}")
+        
+    def randomize(self, data: dict | None = None) -> None:
+        self._transform.randomize(data)
 
     def __call__(self, data: dict) -> list[dict]:
         return self._transform(data)
