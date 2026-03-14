@@ -23,3 +23,6 @@ notebooks/
 
 # Synthstrip docker files
 synthstrip/
+
+# Shell script orchestrating runs
+scripts/train_sweep.sh
