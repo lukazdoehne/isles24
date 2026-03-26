@@ -75,6 +75,7 @@ def get_train_transforms(config: SwinTrainConfig):
             b_min=0.0,
             b_max=1.0,
             clip=True,
+            sanitize_modalities=config.sanitize_modalities,
         ),
     ]
 
@@ -147,6 +148,7 @@ def get_val_transforms(config: SwinTrainConfig):
             b_min=0.0,
             b_max=1.0,
             clip=True,
+            sanitize_modalities=config.sanitize_modalities,
         ),
     ]
 
@@ -177,7 +179,7 @@ class PerChannelScaleIntensityd(MapTransform):
     ----------
     keys : str
         Key for the multichannel image.
-    modalitites: Sequence[str]
+    modalities : Sequence[str]
         Order of channel modalities in the ["image"] key.
     windows : Mapping[str, Sequence[float]] | None
         Intensity windows for each channel, e.g. {"cta": (a_min, a_max)}. If None,
@@ -191,6 +193,9 @@ class PerChannelScaleIntensityd(MapTransform):
         Whether to clip values outside range.
     dtype : DTypeLike
         Output data type, if None, same as input image. defaults to float32.
+    sanitize_modalities : Sequence[str] | None
+        Modalities for which NaN and Inf values are replaced with 0.0 before
+        scaling. If None, no sanitization is performed. Default is None.
     """
 
     def __init__(
@@ -202,6 +207,7 @@ class PerChannelScaleIntensityd(MapTransform):
         b_max: float = 1.0,
         clip: bool = True,
         dtype: DTypeLike = np.float32,
+        sanitize_modalities: Sequence[str] | None = None,
     ):
         super().__init__(keys)
         self.modalities = modalities
@@ -210,6 +216,9 @@ class PerChannelScaleIntensityd(MapTransform):
         self.b_max = b_max
         self.clip = clip
         self.dtype = dtype
+        self.sanitize_modalities = (
+            set(sanitize_modalities) if sanitize_modalities else set()
+        )
 
     def __call__(self, data):
         d = dict(data)
@@ -221,7 +230,10 @@ class PerChannelScaleIntensityd(MapTransform):
             for c, modality in enumerate(self.modalities):
                 channel = image[c : c + 1]
 
-                # Assign windows values
+                # Sanitize NaN/Inf before any scaling
+                if modality in self.sanitize_modalities:
+                    channel = np.nan_to_num(channel, nan=0.0, posinf=0.0, neginf=0.0)
+
                 if self.windows:
                     window = (
                         self.windows[modality]
@@ -231,8 +243,8 @@ class PerChannelScaleIntensityd(MapTransform):
                 else:
                     window = (None, None)
 
-                a_min = window[0] if window[0] else channel.min()
-                a_max = window[1] if window[1] else channel.max()
+                a_min = window[0] if window[0] is not None else channel.min()
+                a_max = window[1] if window[1] is not None else channel.max()
 
                 scaling = ScaleIntensityRange(
                     a_min=a_min,
@@ -304,7 +316,7 @@ class RandCropByModed(Randomizable, MapTransform, MultiSampleTrait):
             )
         else:
             raise ValueError(f"Unknown crop mode: {mode!r}")
-        
+
     def randomize(self, data: dict | None = None) -> None:
         self._transform.randomize(data)
 

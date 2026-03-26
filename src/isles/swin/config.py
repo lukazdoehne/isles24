@@ -23,6 +23,8 @@ class SwinTrainConfig:
     intensity_windows : dict[str, Sequence[float]] | None
         Per-modality intensity windows: {"modality": [min, max]}.
         If None, no intensity windowing is applied.
+    sanitize_modalities : Sequence[str] | None
+        Modalities to be sanitized for inf/nan values. These values will be set to 0.
     model : Literal["BaseSwinUNETR", "MultiEncoderSwinUNETR"]
         Model architecture.
     feature_size : int
@@ -86,6 +88,7 @@ class SwinTrainConfig:
     # Data preprocessing
     target_spacing: Sequence[float] = (1.0, 1.0, 1.0)
     intensity_windows: dict[str, Sequence[float]] | None = None
+    sanitize_modalities: Sequence[str] | None = None
 
     # Model architecture
     model: Literal["BaseSwinUNETR", "MultiEncoderSwinUNETR"] = "MultiEncoderSwinUNETR"
@@ -124,7 +127,7 @@ class SwinTrainConfig:
 
     def __post_init__(self) -> None:
         """Ensure that parameter values are not incompatible"""
-        
+
         # Update parameters when crop_margin is specified
         if self.inferer_crop_margin is not None:
             min_overlap = 2 * self.inferer_crop_margin / min(self.roi_size)

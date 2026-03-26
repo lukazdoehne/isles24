@@ -508,9 +508,10 @@ def train_swin(
 
         wandb.log(metrics)
 
-    # Upload final best model to WandB
+    # Upload final and best model to WandB
     if upload_checkpoints:
         wandb.save(checkpoint_dir / "best_model.pt", base_path=run_dir)
+        wandb.save(checkpoint_dir / "last_model.pt", base_path=run_dir)
 
 
 def get_swin_dataloaders(datalist: dict, config: SwinTrainConfig) -> tuple[DataLoader]:

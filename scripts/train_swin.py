@@ -38,6 +38,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--max-epochs", default=300, type=int)
     parser.add_argument("--learning-rate", default=1e-4, type=float)
+    parser.add_argument("--evaluation", action="store_true")
     return parser.parse_args()
 
 
@@ -111,17 +112,18 @@ def main() -> None:
         case_id_fn=lambda p: re.search(r"sub-stroke\d+", p).group(),
     )
 
-    checkpoint_path = run_dir / "checkpoints/best_model.pt"
-    eval_dir = run_dir / "evaluation"
-    final_evaluation(
-        checkpoint_path=checkpoint_path,
-        val_loader=val_loader,
-        config=config,
-        out_dir=eval_dir,
-        save_logits=True,
-    )
+    if args.evaluation:
+        checkpoint_path = run_dir / "checkpoints/best_model.pt"
+        eval_dir = run_dir / "evaluation"
+        final_evaluation(
+            checkpoint_path=checkpoint_path,
+            val_loader=val_loader,
+            config=config,
+            out_dir=eval_dir,
+            save_logits=True,
+        )
 
-    wandb.save(f"{eval_dir}/**/*", base_path=run_dir)
+        wandb.save(f"{eval_dir}/**/*", base_path=run_dir)
     wandb.finish()
 
 
