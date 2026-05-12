@@ -1,6 +1,9 @@
 """
 Model code for multi-encoder Swin-UNETR
 """
+import sys
+sys.stderr.write(">>> MODEL.PY IS LOADED FROM: " + __file__ + "\n")
+sys.stderr.flush()
 
 import copy
 from pathlib import Path
@@ -123,10 +126,11 @@ class MultiEncoderSwinUNETR(SwinUNETR):
         )
         if tabular_embedding_dim > 0:
             # fused_hidden_states[4] has channel size feature_size * 16
+            # Linear projection (also non linear tested but similar results)
             self.tabular_proj = nn.Sequential(
                 nn.Linear(tabular_embedding_dim, feature_size * 16),
-                nn.GELU(),
-                nn.Linear(feature_size * 16, feature_size * 16),
+                #nn.GELU(),
+                #nn.Linear(feature_size * 16, feature_size * 16),
             )
         else:
             self.tabular_proj = None
@@ -191,6 +195,22 @@ class MultiEncoderSwinUNETR(SwinUNETR):
         dec1 = self.decoder3(dec2, enc2)
         dec0 = self.decoder2(dec1, enc1)
         out = self.decoder1(dec0, enc0)
+
+        if not hasattr(self, "_shapes_printed"):
+            print(f"tabular_shift  : {tabular_shift.shape}")
+            print(f"x_in  : {x_in.shape}")
+            print(f"enc0  : {enc0.shape}")
+            print(f"enc1  : {enc1.shape}")
+            print(f"enc2  : {enc2.shape}")
+            print(f"enc3  : {enc3.shape}")
+            print(f"bottleneck: {bottleneck.shape}")
+            print(f"dec4  : {dec4.shape}")
+            print(f"dec3  : {dec3.shape}")
+            print(f"dec2  : {dec2.shape}")
+            print(f"dec1  : {dec1.shape}")
+            print(f"dec0  : {dec0.shape}")
+            print(f"out   : {out.shape}")
+            self._shapes_printed = True
 
         logits = self.out(out)
         return logits
