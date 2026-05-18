@@ -125,12 +125,21 @@ class MultiEncoderSwinUNETR(SwinUNETR):
             ]
         )
         if tabular_embedding_dim > 0:
-            # fused_hidden_states[4] has channel size feature_size * 16
-            # Linear projection (also non linear tested but similar results)
+            # Project tabular embedding to bottleneck channel size
             self.tabular_proj = nn.Sequential(
                 nn.Linear(tabular_embedding_dim, feature_size * 16),
                 #nn.GELU(),
                 #nn.Linear(feature_size * 16, feature_size * 16),
+            )
+            # encoder10 consumes the concatenated [image_features, tabular_features]
+            self.encoder10 = UnetrBasicBlock(
+                spatial_dims=kwargs.get("spatial_dims", 3),
+                in_channels=feature_size * 32, #768*2
+                out_channels=feature_size * 16, #768
+                kernel_size=3,
+                stride=1,
+                norm_name=kwargs.get("norm_name", "instance"),
+                res_block=True,
             )
         else:
             self.tabular_proj = None
@@ -183,10 +192,29 @@ class MultiEncoderSwinUNETR(SwinUNETR):
         enc3 = self.encoder4(fused_hidden_states[2])
         #dec4 = self.encoder10(fused_hidden_states[4])
         bottleneck = fused_hidden_states[4]
+        tabular_features = None
         if self.tabular_proj is not None and tabular_embedding is not None:
-            tabular_shift = self.tabular_proj(tabular_embedding.float())
-            tabular_shift = tabular_shift.view(tabular_shift.shape[0], -1, 1, 1, 1)
-            bottleneck = bottleneck + tabular_shift
+            tabular_features = self.tabular_proj(tabular_embedding.float())
+            #Shifting
+            #tabular_features = tabular_shift.view(tabular_shift.shape[0], -1, 1, 1, 1)
+            #bottleneck = bottleneck + tabular_features
+            #Concatenating
+            # Sliding-window inference may call forward with window batches that
+            # differ from the tabular batch dimension (often B=1 vs B>1).
+            if tabular_features.shape[0] != bottleneck.shape[0]:
+                if tabular_features.shape[0] == 1:
+                    tabular_features = tabular_features.expand(bottleneck.shape[0], -1)
+                else:
+                    raise RuntimeError(
+                        "Tabular and image batch sizes are incompatible for "
+                        f"concatenation: tabular={tabular_features.shape[0]}, "
+                        f"image={bottleneck.shape[0]}"
+                    )
+
+            tabular_features = tabular_features.view(
+                bottleneck.shape[0], -1, 1, 1, 1
+            ).expand(-1, -1, bottleneck.shape[2], bottleneck.shape[3], bottleneck.shape[4])
+            bottleneck = torch.cat([bottleneck, tabular_features], dim=1)
 
         dec4 = self.encoder10(bottleneck)
 
@@ -197,7 +225,8 @@ class MultiEncoderSwinUNETR(SwinUNETR):
         out = self.decoder1(dec0, enc0)
 
         if not hasattr(self, "_shapes_printed"):
-            print(f"tabular_shift  : {tabular_shift.shape}")
+            if tabular_features is not None:
+                print(f"tabular_features: {tabular_features.shape}")
             print(f"x_in  : {x_in.shape}")
             print(f"enc0  : {enc0.shape}")
             print(f"enc1  : {enc1.shape}")
