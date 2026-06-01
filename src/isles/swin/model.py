@@ -141,8 +141,19 @@ class MultiEncoderSwinUNETR(SwinUNETR):
                 norm_name=kwargs.get("norm_name", "instance"),
                 res_block=True,
             )
+            # Keep concatenating tabular context at each decoder scale.
+            self.tabular_decoder_channels = [feature_size * 8, feature_size * 4, feature_size * 2, feature_size]
+            self.tabular_decoder_proj = nn.ModuleList(
+                [nn.Linear(tabular_embedding_dim, ch) for ch in self.tabular_decoder_channels]
+            )
+            self.tabular_decoder_fuse = nn.ModuleList(
+                [nn.Conv3d(in_channels=ch * 2, out_channels=ch, kernel_size=1) for ch in self.tabular_decoder_channels]
+            )
         else:
             self.tabular_proj = None
+            self.tabular_decoder_channels = []
+            self.tabular_decoder_proj = nn.ModuleList()
+            self.tabular_decoder_fuse = nn.ModuleList()
 
         # Replace encoder1 to handle multi-channel input
         self.encoder1 = UnetrBasicBlock(
@@ -218,10 +229,40 @@ class MultiEncoderSwinUNETR(SwinUNETR):
 
         dec4 = self.encoder10(bottleneck)
 
+        decoder_concat_shapes: dict[str, torch.Size] = {}
+
+        def concat_tabular_at_scale(
+            feature_map: torch.Tensor, scale_idx: int, stage_name: str
+        ) -> torch.Tensor:
+            if tabular_embedding is None or self.tabular_proj is None:
+                return feature_map
+
+            tab_scale = self.tabular_decoder_proj[scale_idx](tabular_embedding.float())
+            if tab_scale.shape[0] != feature_map.shape[0]:
+                if tab_scale.shape[0] == 1:
+                    tab_scale = tab_scale.expand(feature_map.shape[0], -1)
+                else:
+                    raise RuntimeError(
+                        "Tabular and image batch sizes are incompatible for "
+                        f"concatenation: tabular={tab_scale.shape[0]}, "
+                        f"image={feature_map.shape[0]}"
+                    )
+
+            tab_scale = tab_scale.view(feature_map.shape[0], -1, 1, 1, 1).expand(
+                -1, -1, feature_map.shape[2], feature_map.shape[3], feature_map.shape[4]
+            )
+            fused = torch.cat([feature_map, tab_scale], dim=1)
+            decoder_concat_shapes[stage_name] = fused.shape
+            return self.tabular_decoder_fuse[scale_idx](fused)
+
         dec3 = self.decoder5(dec4, fused_hidden_states[3])
+        dec3 = concat_tabular_at_scale(dec3, 0, "dec3")
         dec2 = self.decoder4(dec3, enc3)
+        dec2 = concat_tabular_at_scale(dec2, 1, "dec2")
         dec1 = self.decoder3(dec2, enc2)
+        dec1 = concat_tabular_at_scale(dec1, 2, "dec1")
         dec0 = self.decoder2(dec1, enc1)
+        dec0 = concat_tabular_at_scale(dec0, 3, "dec0")
         out = self.decoder1(dec0, enc0)
 
         if not hasattr(self, "_shapes_printed"):
@@ -234,6 +275,11 @@ class MultiEncoderSwinUNETR(SwinUNETR):
             print(f"enc3  : {enc3.shape}")
             print(f"bottleneck: {bottleneck.shape}")
             print(f"dec4  : {dec4.shape}")
+            if decoder_concat_shapes:
+                print(f"dec3_cat: {decoder_concat_shapes.get('dec3')}")
+                print(f"dec2_cat: {decoder_concat_shapes.get('dec2')}")
+                print(f"dec1_cat: {decoder_concat_shapes.get('dec1')}")
+                print(f"dec0_cat: {decoder_concat_shapes.get('dec0')}")
             print(f"dec3  : {dec3.shape}")
             print(f"dec2  : {dec2.shape}")
             print(f"dec1  : {dec1.shape}")
