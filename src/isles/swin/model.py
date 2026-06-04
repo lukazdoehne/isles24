@@ -141,16 +141,43 @@ class MultiEncoderSwinUNETR(SwinUNETR):
                 norm_name=kwargs.get("norm_name", "instance"),
                 res_block=True,
             )
+            """
             # Keep concatenating tabular context at each decoder scale.
             self.tabular_decoder_channels = [feature_size * 8, feature_size * 4, feature_size * 2, feature_size]
+            """
+            # Keep concatenating tabular context at each decoder scale, but use
+            # a fixed-width tabular branch instead of matching decoder channels.
+            self.tabular_decoder_context_dim = 16
+            self.tabular_decoder_channels = [
+                feature_size * 8,
+                feature_size * 4,
+                feature_size * 2,
+                feature_size,
+            ]
+
             self.tabular_decoder_proj = nn.ModuleList(
-                [nn.Linear(tabular_embedding_dim, ch) for ch in self.tabular_decoder_channels]
+                # [nn.Linear(tabular_embedding_dim, ch) for ch in self.tabular_decoder_channels]
+                [
+                    nn.Linear(tabular_embedding_dim, self.tabular_decoder_context_dim)
+                    for _ in self.tabular_decoder_channels
+                ]
+
             )
             self.tabular_decoder_fuse = nn.ModuleList(
-                [nn.Conv3d(in_channels=ch * 2, out_channels=ch, kernel_size=1) for ch in self.tabular_decoder_channels]
+                # [nn.Conv3d(in_channels=ch * 2, out_channels=ch, kernel_size=1) for ch in self.tabular_decoder_channels]
+                [
+                    nn.Conv3d(
+                        in_channels=ch + self.tabular_decoder_context_dim,
+                        out_channels=ch,
+                        kernel_size=1,
+                    )
+                    for ch in self.tabular_decoder_channels
+                ]
+
             )
         else:
             self.tabular_proj = None
+            self.tabular_decoder_context_dim = 0
             self.tabular_decoder_channels = []
             self.tabular_decoder_proj = nn.ModuleList()
             self.tabular_decoder_fuse = nn.ModuleList()
